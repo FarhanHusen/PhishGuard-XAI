@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hasil Analisis - PhishGuard XAI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+
+<div class="container result-container">
+    <div class="result-header card glass">
+        <a href="/" class="btn-icon-back"><i class="fas fa-chevron-left"></i> Kembali</a>
+        <h1>Analisis Keamanan</h1>
+        
+        <div class="url-display">
+            <code>{{ url }}</code>
+        </div>
+
+        <div class="status-badge {{ label|lower }}">
+            <i class="fas {% if label == 'Phishing' %}fa-skull-crossbones{% elif label == 'Suspicious' %}fa-exclamation-triangle{% else %}fa-check-circle{% endif %}"></i>
+            <span>{{ label | upper }}</span>
+        </div>
+
+        <div class="meter-container">
+            <div class="meter-text">Tingkat Risiko: <strong>{{ confidence }}%</strong></div>
+            <div class="meter-bg">
+                <div class="meter-fill" style="width: {{ confidence }}%; background: {% if label == 'Phishing' %}#ff4757{% elif label == 'Suspicious' %}#ffa502{% else %}#2ed573{% endif %};"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="explanation-section card glass">
+        <h3><i class="fas fa-brain"></i> Mengapa Model Memutuskan Ini?</h3>
+        <p class="text-muted">Interpretasi fitur menggunakan SHAP (Explainable AI)</p>
+
+        <div class="table-responsive">
+            <table class="shap-table">
+                <thead>
+                    <tr>
+                        <th>Indikator Fitur</th>
+                        <th class="text-right">Kontribusi</th>
+                        <th>Visualisasi Pengaruh</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for feature, value in shap_values.items() %}
+                    <tr>
+                        <td class="feature-name">{{ feature }}</td>
+                        <td class="text-right font-mono">{{ "+" if value > 0 }}{{ value }}</td>
+                        <td>
+                            <div class="bar-wrapper">
+                                <div class="bar-bg">
+                                    <div class="bar-fill {% if value > 0 %}pos{% else %}neg{% endif %}" 
+                                         style="width: {{ (value | abs * 100) if (value | abs * 100) < 100 else 100 }}%;">
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="legend card">
+            <div class="legend-item"><span class="dot red"></span> Positif: Mendorong ke arah Phishing</div>
+            <div class="legend-item"><span class="dot green"></span> Negatif: Mendorong ke arah Aman</div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
