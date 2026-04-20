@@ -1,40 +1,41 @@
 from flask import Flask, render_template, request
 import pandas as pd
 import joblib
-import numpy as np
 import os
-
-# Import fungsi ekstraksi fitur buatanmu
-# Pastikan file ini ada di folder utils/feature_extraction.py
+import shap
+import numpy as np
 from utils.feature_extraction import extract_features
 
 app = Flask(__name__)
 
 # ==========================================
-# 1. LOAD ASSETS (MODEL & EXPLAINER)
+# 1. LOAD ASSETS
 # ==========================================
-# Gunakan path yang aman agar tidak error saat dideploy
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-model = joblib.load(os.path.join(BASE_DIR, "xgboost_phishing_model.pkl"))
+def load_model_assets():
+    try:
+        model = joblib.load(os.path.join(BASE_DIR, "xgboost_phishing_model.pkl"))
+        feature_order = joblib.load(os.path.join(BASE_DIR, "feature_columns.pkl"))
+        explainer = joblib.load(os.path.join(BASE_DIR, "shap_explainer.pkl"))
+        return model, feature_order, explainer
+    except Exception as e:
+        print(f"Error Loading Assets: {e}")
+        return None, None, None
 
-# Load explainer. Jika tadi kamu simpan dengan nama 'shap_explainer.pkl'
-try:
-    explainer = joblib.load(os.path.join(BASE_DIR, "shap_explainer.pkl"))
-except:
-    # Fallback jika file belum ada, buat explainer baru dari model
-    import shap
-    explainer = shap.TreeExplainer(model)
+model, FEATURE_ORDER, explainer = load_model_assets()
 
-# Load urutan fitur agar sinkron dengan model (Sangat Penting!)
-try:
-    FEATURE_ORDER = joblib.load(os.path.join(BASE_DIR, "feature_columns.pkl"))
-except:
-    # Manual fallback jika file pkl tidak ada
-    FEATURE_ORDER = [
-        "NumDots", "UrlLength", "NumDash", "AtSymbol", "IpAddress", 
-        "HttpsInHostname", "PathLevel", "PathLength", "NumNumericChars"
-    ]
+# ==========================================
+# 2. WHITELIST LOGIC
+# ==========================================
+WHITELIST_DOMAINS = ['facebook.com', 'google.com', 'instagram.com', 'microsoft.com', 'apple.com', 'github.com', 'unisayogya.ac.id']
+
+def check_whitelist(url):
+    url_lower = url.lower()
+    for domain in WHITELIST_DOMAINS:
+        if domain in url_lower:
+            return True
+    return False
 
 # ==========================================
 # ROUTES
@@ -43,63 +44,79 @@ except:
 def index():
     return render_template("index.html")
 
-
 @app.route("/predict", methods=["POST"])
 def predict():
     url = request.form.get("url", "").strip()
-    
-    if not url:
-        return "Silakan masukkan URL!"
+    if not url: return "Silakan masukkan URL!"
+
+    # --- JALUR CEPAT: WHITELIST ---
+    if check_whitelist(url):
+        return render_template(
+            "result.html",
+            url=url,
+            label="Aman",
+            confidence=0.01,
+            shap_values={}, 
+            status_color="success"
+        )
 
     try:
-        # 1. Ekstraksi Fitur
+        # 1. Ekstraksi & Sinkronisasi
         features = extract_features(url)
-        
-        # 2. Buat DataFrame
         X = pd.DataFrame([features])
-
-        # --- LOGIKA PENYELAMAT (ANTI ERROR 'Unnamed: 0') ---
-        # Cek apakah FEATURE_ORDER mengandung kolom sampah
-        # Jika model minta 'Unnamed: 0' tapi di X tidak ada, kita buatkan dengan nilai 0
-        for col in FEATURE_ORDER:
-            if col not in X.columns:
-                X[col] = 0  # Isi dengan 0 agar model tidak error
-        
-        # Pastikan urutan kolom sesuai keinginan model
         X = X[FEATURE_ORDER] 
-        # --------------------------------------------------
 
-        # 3. Prediksi
-        proba_all = model.predict_proba(X)[0]
-        phishing_prob = float(proba_all[1])
-        confidence = round(phishing_prob * 100, 2)
+        # 2. Prediksi
+        proba = model.predict_proba(X)[0][1]
+        confidence = round(float(proba) * 100, 2)
 
-        # 4. Logika Label
-        if phishing_prob >= 0.7:
-            label = "Phishing"
-            status_color = "danger"
-        elif phishing_prob >= 0.4:
-            label = "Suspicious"
-            status_color = "warning"
+        # 3. Thresholding
+        if proba >= 0.9:
+            label, status_color = "Phishing", "danger"
+        elif proba >= 0.5:
+            label, status_color = "Suspicious (Perlu Dicek)", "warning"
         else:
-            label = "Aman"
-            status_color = "success"
+            label, status_color = "Aman", "success"
 
-        # 5. SHAP
+        # 4. SHAP (Explainable AI)
         shap_values_raw = explainer.shap_values(X)
-        if isinstance(shap_values_raw, list):
-            s_val = shap_values_raw[1][0]
+        
+        # Logika pengambilan nilai SHAP untuk XGBoost (Binary Classification)
+        if hasattr(shap_values_raw, "shape"):
+            if len(shap_values_raw.shape) == 2:
+                s_val = shap_values_raw[0]
+            else:
+                s_val = shap_values_raw
         else:
-            s_val = shap_values_raw[0]
+            s_val = shap_values_raw[0] if isinstance(shap_values_raw, list) else shap_values_raw
 
+        # 5. MAPPING KE BAHASA INDONESIA
+        feature_mapping = {
+            "UrlLength": "Panjang URL",
+            "HostnameLength": "Panjang Nama Domain",
+            "PathLength": "Panjang Folder/Path",
+            "NumDots": "Jumlah Titik (.)",
+            "NumDash": "Jumlah Tanda Hubung (-)",
+            "NumNumericChars": "Jumlah Karakter Angka",
+            "AtSymbol": "Penggunaan Simbol @",
+            "HttpsInHostname": "HTTPS Palsu di Domain",
+            "IsIpAddress": "Menggunakan Alamat IP",
+            "SubdomainLevel": "Tingkat Subdomain",
+            "AbnormalSubdomain": "Subdomain Mencurigakan",
+            "IsAcademicDomain": "Domain Akademik (.ac.id)",
+            "NumSensitiveWords": "Jumlah Kata Sensitif"
+        }
+        # Olah data SHAP menjadi dictionary terjemahan
         shap_dict = {}
         for feat, val in zip(FEATURE_ORDER, s_val):
-            # Jangan tampilkan 'Unnamed: 0' di tabel hasil web agar tidak bingung
-            if feat != "Unnamed: 0":
-                shap_dict[feat] = round(float(val), 4)
+            if "Unnamed" not in feat:
+                nama_indo = feature_mapping.get(feat, feat)
+                shap_dict[nama_indo] = round(float(val), 4)
 
+        # Urutkan berdasarkan pengaruh absolut terbesar
         sorted_shap = dict(sorted(shap_dict.items(), key=lambda item: abs(item[1]), reverse=True))
 
+        # 6. KIRIM KE RESULT (Hanya satu return di sini)
         return render_template(
             "result.html",
             url=url,
@@ -112,10 +129,7 @@ def predict():
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        return f"Terjadi kesalahan saat memproses URL: {str(e)}"
+        return f"Sistem error: {str(e)}"
 
-# ==========================================
-# RUN APP
-# ==========================================
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True)

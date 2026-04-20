@@ -1,5 +1,16 @@
+# Folder lingkungan virtual
 venv/
 .venv/
 env/
+
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Assets model (Opsional: Jika sizenya terlalu besar >100MB)
+# Biasanya .pkl kecil, tapi kalau datanya jutaan bisa besar.
+# xgboost_phishing_model.pkl
+# shap_explainer.pkl
+
+# File Dataset (Karena raw_urls.csv kamu sangat besar!)
+raw_urls.csv

@@ -1,97 +1,112 @@
 import pandas as pd
 import joblib
-import shap
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
 from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+from utils.feature_extraction import extract_features 
+from tqdm import tqdm
 import os
+import shap
 
-# ===============================
-# 1. LOAD DATA
-# ===============================
-print("[1/5] Loading dan membersihkan data...")
-# Di train_model.py, saat load data:
-df = pd.read_csv("Phising_Detection_Dataset.csv")
+# ==========================================
+# 1. LOAD DATASET
+# ==========================================
+file_path = "raw_urls.csv"
+if not os.path.exists(file_path):
+    print(f"Error: File '{file_path}' tidak ditemukan!")
+    exit()
 
-# Hapus kolom yang tidak diinginkan sebelum training
-if 'Unnamed: 0' in df.columns:
-    df = df.drop(columns=['Unnamed: 0'])
+df_raw = pd.read_csv(file_path)
 
-# Atau gunakan ini untuk hapus semua yang berawalan 'Unnamed'
-df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-# Bersihkan nama kolom jika ada tanda koma di depan (seperti di screenshot kamu)
-df.columns = [c.replace(',', '').strip() for c in df.columns]
+# Identifikasi Kolom (Berdasarkan dataset: 'url' dan 'target')
+url_col = 'url'
+label_col = 'target'
 
-# Hilangkan baris dengan label Phising yang kosong (Penyebab error awal)
-df = df.dropna(subset=['Phising'])
+# Bersihkan data dari nilai kosong
+df_raw = df_raw.dropna(subset=[url_col, label_col])
 
-# Pastikan label Phising adalah integer (0 atau 1)
-df['Phising'] = df['Phising'].astype(int)
+print(f"Memproses {len(df_raw)} data URL...")
 
-# Pisahkan Fitur (X) dan Target (y)
-X = df.drop(columns=['Phising'])
-y = df['Phising']
+# ==========================================
+# 2. EKSTRAKSI FITUR (SINKRON)
+# ==========================================
+feature_list = []
+labels_list = []
 
-# Tangani nilai kosong di fitur dengan median
-if X.isnull().values.any():
-    X = X.fillna(X.median())
+for index, row in tqdm(df_raw.iterrows(), total=df_raw.shape[0], desc="Ekstraksi Fitur"):
+    try:
+        # Ekstrak fitur
+        feat = extract_features(str(row[url_col]))
+        feature_list.append(feat)
+        # Simpan label hanya jika ekstraksi berhasil
+        labels_list.append(row[label_col])
+    except Exception as e:
+        continue
 
-print(f"Dataset dimuat: {X.shape[0]} baris, {X.shape[1]} fitur.")
+X = pd.DataFrame(feature_list)
+y = pd.Series(labels_list)
 
-# ===============================
-# 2. SPLIT DATA
-# ===============================
+# Simpan urutan kolom untuk app.py
+FEATURE_COLUMNS = X.columns.tolist()
+joblib.dump(FEATURE_COLUMNS, "feature_columns.pkl")
+
+# ==========================================
+# 3. SPLIT DATA
+# ==========================================
+# Menggunakan stratify agar distribusi kelas tetap seimbang
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-# ===============================
-# 3. TRAIN MODEL (XGBOOST)
-# ===============================
-print("[2/5] Melatih model...")
-neg = y_train.value_counts()[0]
-pos = y_train.value_counts()[1]
-scale_pos_weight = neg / pos
+# ==========================================
+# 4. TRAINING XGBOOST (DENGAN PENALTI KETAT)
+# ==========================================
+print("\nMelatih model XGBoost dengan parameter Anti-Overfitting...")
 
 model = XGBClassifier(
     n_estimators=200,
-    max_depth=6,
-    learning_rate=0.1,
-    scale_pos_weight=scale_pos_weight,
+    max_depth=4,
+    learning_rate=0.05,
+    
+    # PARAMETER ANTI-OVERFITTING
+    reg_lambda=3.0,
+    reg_alpha=1.0,
+    gamma=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    
+    # PINDAHKAN EARLY STOPPING KE SINI
+    early_stopping_rounds=10, 
+    
     random_state=42,
     eval_metric='logloss'
 )
 
-model.fit(X_train, y_train)
+# Di bagian .fit(), hapus early_stopping_rounds
+model.fit(
+    X_train, y_train,
+    eval_set=[(X_test, y_test)],
+    verbose=False
+)
 
-# ===============================
-# 4. EVALUASI
-# ===============================
-print("\n[3/5] Evaluasi Model:")
+# ==========================================
+# 5. EVALUASI
+# ==========================================
 y_pred = model.predict(X_test)
+print("\n--- LAPORAN KLASIFIKASI ---")
 print(classification_report(y_test, y_pred))
+print(f"Akurasi Akhir: {round(accuracy_score(y_test, y_pred) * 100, 2)}%")
 
-# ===============================
-# 5. SIMPAN ASSET & VISUAL SHAP
-# ===============================
-print("[4/5] Menyimpan model...")
+# ==========================================
+# 6. SIMPAN ASSETS
+# ==========================================
+print("\nMenyimpan assets...")
+
+# Simpan Model Utama
 joblib.dump(model, "xgboost_phishing_model.pkl")
-joblib.dump(X.columns.tolist(), "feature_columns.pkl")
 
-print("[5/5] Membuat grafik SHAP...")
+# Simpan SHAP Explainer
 explainer = shap.TreeExplainer(model)
-# Ambil 500 sampel data test untuk penjelasan visual
-shap_values = explainer.shap_values(X_test[:500])
+joblib.dump(explainer, "shap_explainer.pkl")
 
-plt.figure(figsize=(12, 8))
-# Membuat grafik summary plot (XAI)
-shap.summary_plot(shap_values, X_test[:500], show=False)
-plt.title("Fitur Paling Berpengaruh dalam Deteksi Phishing")
-plt.tight_layout()
-plt.savefig("shap_summary_plot.png")
-
-print("\n✅ SELESAI!")
-print("- Model disimpan: xgboost_phishing_model.pkl")
-print("- Grafik SHAP disimpan: shap_summary_plot.png")
+print("SUKSES! Model lebih bijak (Generalize) sekarang.")
